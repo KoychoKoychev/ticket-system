@@ -460,6 +460,254 @@ class SupportClient {
         }
     }
 
+    async readAllTickets(data) {
+        /* Valid data format:
+            {
+                "userKey": string REQUIRED
+                "hashData": string OPTIONAL,
+                "page": number OPTIONAL,
+                "pageSize": number OPTIONAL
+            }
+        */
+        if (!data.hasOwnProperty('userKey')) {
+            throw new Error('Passed data must include userKey property.')
+        }
+        const response = await this.composeRequest('READ_ALL_TICKET_LIST', data)
+        if (response.error === false && response.data) {
+            if (response.data[0] !== 'No ticket changes.') {
+                return {
+                    "hashData": await this.sha256(JSON.stringify(response.data)),
+                    "data": await this.decryptTicketList(response.data)
+                };
+            } else {
+                return 'No ticket changes.';
+            }
+        } else {
+            return response;
+        }
+    }
+
+    async createTicket(data) {
+        /* Valid data format:
+            {
+                "isGuest": false,
+                "subject": "1",
+                "lang": null, 
+                "type": "support",
+                "message": "Test message send through automated tests.",
+                "message_type": null,
+                "email": null,
+                "attachments": [{"mime_type":"image/jpg","name":"file1","base64":"mockBase64String","ATTACHMENT_ID":"123"},
+                {"mime_type":"image/jpg","name":"file2","base64":"mockBase64String2","ATTACHMENT_ID":"456"}]
+            }
+        */
+        let KeyPair
+        if(!data.symmetricCryptoKey || !data.TICKET_ID){
+            KeyPair = await this.generateTicketKeys(this.userKey)
+        }
+        const symmetricCryptoKey = KeyPair ? KeyPair.symmetricCryptoKey : data.symmetricCryptoKey;
+        const TICKET_ID = KeyPair ?  KeyPair.TICKET_ID : data.TICKET_ID;
+
+        const requestData = {
+            "userKey": this.userKey,
+            "ticketID": TICKET_ID,
+            "ticket": await this.composeTicketContent(data, symmetricCryptoKey),
+            "ticketStatus": await this.composeTicketStatus(data, symmetricCryptoKey),
+            "message": await this.composeTicketMessage(data, symmetricCryptoKey),
+            "messageStatus": await this.composeMessageStatus(data, symmetricCryptoKey),
+            "attachments": await this.composeAttachments(data, symmetricCryptoKey)
+        }
+        return this.composeRequest('CREATE_CONVERSATION', requestData);
+    }
+
+    deleteTicket(data) {
+        /* Valid data format:
+            {
+                "ticketID": string REQUIRED
+            }
+        */
+        if (!data.hasOwnProperty('ticketID')) {
+            throw new Error('Passed data must include ticketID property.')
+        }
+        return this.composeRequest('DELETE_CONVERSATION', { ticketID: data.ticketID, userKey: this.userKey });
+    }
+
+    deleteMessage(data) {
+        /* Valid data format:
+            {
+                "ticketID": string, REQUIRED
+                "messageID": string REQUIRED
+            }
+        */
+        if (!data.hasOwnProperty('ticketID')) {
+            throw new Error('Passed data must include ticketID property.')
+        }
+        if (!data.hasOwnProperty('messageID')) {
+            throw new Error('Passed data must include messageID property.')
+        }
+        return this.composeRequest('DELETE_MESSAGE', {
+            "userKey": this.userKey,
+            "ticketID": data.ticketID,
+            "messageID": data.messageID
+        });
+    }
+
+    async changeTicketStatus(data) {
+        /* Valid data format:
+            {
+                "ticketStatus": string REQUIRED
+                "ticketID": string REQUIRED
+            }
+        */
+        if (!data.hasOwnProperty('ticketStatus')) {
+            throw new Error('Passed data must include new status.')
+        }
+        const symmetricKey = await this.getSymmetricKeyByTicket(data.ticketID, this.userKey)
+        const symmetricCryptoKey = await this.global.crypto.subtle.importKey('raw', symmetricKey, "AES-CBC", true, ['encrypt', 'decrypt'])
+
+        let requestData = {
+            "userKey": this.userKey,
+            "ticketID": data.ticketID,
+            "content": await this.composeTicketStatus(data, symmetricCryptoKey)
+        }
+        return this.composeRequest('CHANGE_STATUS', requestData);
+    }
+
+    async createMessage(data) {
+        /* Valid data format:
+            {
+                "ticketID": string
+                "message": string,
+                "attachments": [object],
+                "supportID": string OPTIONAL
+            }
+
+            attachmentObj = {
+                mime_type,
+                name,
+                base64,
+                ATTACHMENT_ID
+            }
+
+            ** Message must at least include a message or an attachment.
+        */
+
+        if ((data.message && data.message.length !== 0) || (data.attachments && data.attachments.lenght !== 0)) {
+        } else {
+            throw new Error('Passed data must include a message or an attachments array.')
+        }
+        if (!data.hasOwnProperty('ticketID')) {
+            throw new Error('Passed data must include ticketID property.')
+        }
+
+        const symmetricKey = await this.getSymmetricKeyByTicket(data.ticketID, this.userKey)
+        const symmetricCryptoKey = await this.global.crypto.subtle.importKey('raw', symmetricKey, "AES-CBC", true, ['encrypt', 'decrypt'])
+        let requestData = {
+            "userKey": this.userKey,
+            "ticketID": data.ticketID,
+            "message": await this.composeTicketMessage(data, symmetricCryptoKey),
+            "messageStatus": await this.composeMessageStatus(data, symmetricCryptoKey),
+            "attachments": await this.composeAttachments(data, symmetricCryptoKey)
+        }
+
+        return this.composeRequest('SEND_MESSAGE', requestData);
+    }
+
+    async readSingleTicket(data) {
+        /* Valid data format:
+            {
+                "ticketID": string REQUIRED
+            }
+        */
+        if (!data.hasOwnProperty('ticketID')) {
+            throw new Error('Passed data must include ticketID property.')
+        }
+        const response = await this.composeRequest('READ_SINGLE_TICKET', {
+            "userKey": this.userKey,
+            "ticketID": data.ticketID
+        })
+        if (response.error === false && response.data) {
+            return (await this.decryptTicketList([response.data]))[0];
+        } else {
+            return response;
+        }
+    }
+
+    async getAttachment(data) {
+        /* Valid data format:
+            {
+                "ticketID": string REQUIRED
+                "attachmentID": string REQUIRED
+            }
+        */
+        if (!data.hasOwnProperty('ticketID')) {
+            throw new Error('Passed data must include ticketID property.')
+        }
+        if (!data.hasOwnProperty('attachmentID')) {
+            throw new Error('Passed data must include attachmentID property.')
+        }
+        const response = await this.composeRequest('GET_ATTACHMENT', {
+            "hashedAttachmentID": await this.sha256(data.attachmentID)
+        })
+        if (response.error === false && response.data) {
+            return (await this.decryptAttachment(response.data.CONTENT, data.ticketID));
+        } else {
+            return response;
+        }
+    }
+
+    async changeMessageStatus(data) {
+        /* Valid data format:
+            {
+                "messageStatus": string REQUIRED,
+                "messageID": string REQUIRED,
+                "ticketID": string REQUIRED
+            }
+        */
+        if (!data.hasOwnProperty('messageStatus')) {
+            throw new Error('Passed data must include new status.')
+        }
+        if (!data.hasOwnProperty('messageID')) {
+            throw new Error('Passed data must include messageID.')
+        }
+        if (!data.hasOwnProperty('ticketID')) {
+            throw new Error('Passed data must include ticketID.')
+        }
+        const symmetricKey = await this.getSymmetricKeyByTicket(data.ticketID, this.userKey)
+        const symmetricCryptoKey = await this.global.crypto.subtle.importKey('raw', symmetricKey, "AES-CBC", true, ['encrypt', 'decrypt'])
+
+        let requestData = {
+            "ticketID": data.ticketID,
+            "messageID": data.messageID,
+            "messageStatus": await this.composeMessageStatus(data, symmetricCryptoKey),
+            "userKey": this.userKey
+        }
+        return this.composeRequest('CHANGE_MESSAGE_STATUS', requestData);
+    }
+
+    async getSubjectMaps() {
+
+        return this.composeRequest('GET_SUBJECT_MAPS');
+    }
+
+    async getTicketStatusHistory(data) {
+
+        let response = await this.composeRequest('GET_TICKET_STATUS_HISTORY', {
+            "ticketID": data.ticketID,
+            "userKey": this.userKey
+        })
+        if(response.error == false) {
+            let decryptedStatuses = await Promise.all (response.data.map(status => this.decryptStatus(status,{
+                TICKET_ID: data.ticketID,
+                USER_KEY: this.userKey
+                })
+            ))
+            return decryptedStatuses
+        }else {
+            throw new Error(response.msg)
+        }
+    }
+
 }
 
 export default SupportClient
